@@ -472,12 +472,43 @@ if __name__ == "__main__":
             else:
                 logging.warning("⚠️ WEBHOOK_URL not set, webhook not configured. Please set WEBHOOK_URL environment variable.")
         
+        # Keep-alive task to prevent Render from sleeping
+        async def keep_alive_background(app):
+            """Background task to periodically ping health endpoint"""
+            import aiohttp
+            
+            # Wait for server to be ready
+            await asyncio.sleep(15)
+            
+            while True:
+                try:
+                    # Ping our own health endpoint to keep service alive
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(f"http://localhost:{PORT}/health", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                            if resp.status == 200:
+                                logging.debug("Keep-alive ping successful")
+                            else:
+                                logging.warning(f"Keep-alive ping returned status {resp.status}")
+                except asyncio.TimeoutError:
+                    logging.warning("Keep-alive ping timed out")
+                except Exception as e:
+                    logging.error(f"Keep-alive ping failed: {e}")
+                
+                # Ping every 5 minutes (300 seconds) - Render free tier sleeps after ~15 min of inactivity
+                await asyncio.sleep(300)
+        
         # Create web application
         web_app = web.Application()
         web_app.router.add_post("/webhook", webhook_handler)
         web_app.router.add_get("/health", health_check)
         web_app.router.add_get("/", health_check)
         web_app.on_startup.append(post_init)
+        
+        # Start keep-alive background task
+        async def start_keep_alive(app):
+            asyncio.create_task(keep_alive_background(app))
+        
+        web_app.on_startup.append(start_keep_alive)
         
         # Start web server
         logging.info(f"Starting web server on port {PORT}")
