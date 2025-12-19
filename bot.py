@@ -398,12 +398,28 @@ if __name__ == "__main__":
         
         # Set webhook on startup
         async def post_init(app):
-            if WEBHOOK_URL:
-                webhook_path = f"{WEBHOOK_URL}/webhook"
-                await bot_app.bot.set_webhook(url=webhook_path)
-                logging.info(f"Webhook set to {webhook_path}")
+            # Try to get webhook URL from environment or construct from Render service
+            webhook_url = WEBHOOK_URL
+            if not webhook_url:
+                # Try to get from Render's RENDER_EXTERNAL_URL or construct from service name
+                render_url = os.getenv("RENDER_EXTERNAL_URL")
+                if render_url:
+                    webhook_url = render_url
+                else:
+                    # Try to construct from common Render pattern
+                    service_name = os.getenv("RENDER_SERVICE_NAME", "lapu-all-server-bot")
+                    webhook_url = f"https://{service_name}.onrender.com"
+                    logging.info(f"Constructed webhook URL from service name: {webhook_url}")
+            
+            if webhook_url:
+                webhook_path = f"{webhook_url}/webhook"
+                try:
+                    await bot_app.bot.set_webhook(url=webhook_path)
+                    logging.info(f"✅ Webhook successfully set to {webhook_path}")
+                except Exception as e:
+                    logging.error(f"❌ Failed to set webhook: {e}")
             else:
-                logging.warning("WEBHOOK_URL not set, webhook not configured")
+                logging.warning("⚠️ WEBHOOK_URL not set, webhook not configured. Please set WEBHOOK_URL environment variable.")
         
         # Create web application
         web_app = web.Application()
