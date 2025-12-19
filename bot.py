@@ -1,6 +1,11 @@
+import os
 from telegram.ext import ApplicationBuilder, MessageHandler, filters
-from config import BOT_TOKEN
 from services.responder import generate_response
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable not set")
 
 async def handle_message(update, context):
     reply = generate_response(update.message.text)
