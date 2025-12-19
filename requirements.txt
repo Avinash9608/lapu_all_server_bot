@@ -1,2 +1,2 @@
-python-telegram-bot==20.7
-rapidfuzz==3.9.6
+python-telegram-bot==20.5
+python-dotenv
