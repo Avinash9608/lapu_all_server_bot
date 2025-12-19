@@ -1,9 +1,11 @@
 import os
 import json
 import re
+import logging
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from aiohttp import web
 
 # Load environment
 load_dotenv()
@@ -350,8 +352,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = handle_query(update.message.text)
     await update.message.reply_text(response, parse_mode='Markdown')
 
+def create_app():
+    """Create and configure the bot application"""
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    return application
+
+# Global bot application instance
+bot_app = None
+
+# Health check endpoint
+async def health_check(request):
+    """Health check endpoint for Render"""
+    return web.Response(text="Bot is running")
+
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling()
+    # Configure logging
+    logging.basicConfig(
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        level=logging.INFO
+    )
+    
+    bot_app = create_app()
+    
+    # Check if we're in production (Render) or development
+    PORT = os.getenv("PORT")
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    
+    if PORT:
+        # Production mode: Use webhook with web server
+        logging.info(f"Starting in webhook mode on port {PORT}")
+        
+        # Create webhook handler
+        async def webhook_handler(request):
+            """Handle incoming webhook requests"""
+            if request.method == "POST":
+                try:
+                    data = await request.json()
+                    update = Update.de_json(data, bot_app.bot)
+                    await bot_app.process_update(update)
+                except Exception as e:
+                    logging.error(f"Error processing webhook: {e}")
+            return web.Response(text="OK")
+        
+        # Set webhook on startup
+        async def post_init(app):
+            if WEBHOOK_URL:
+                webhook_path = f"{WEBHOOK_URL}/webhook"
+                await bot_app.bot.set_webhook(url=webhook_path)
+                logging.info(f"Webhook set to {webhook_path}")
+            else:
+                logging.warning("WEBHOOK_URL not set, webhook not configured")
+        
+        # Create web application
+        web_app = web.Application()
+        web_app.router.add_post("/webhook", webhook_handler)
+        web_app.router.add_get("/health", health_check)
+        web_app.router.add_get("/", health_check)
+        web_app.on_startup.append(post_init)
+        
+        # Start web server
+        logging.info(f"Starting web server on port {PORT}")
+        web.run_app(web_app, port=int(PORT), host="0.0.0.0")
+    else:
+        # Development mode: Use polling
+        logging.info("Starting in polling mode (development)")
+        bot_app.run_polling()
