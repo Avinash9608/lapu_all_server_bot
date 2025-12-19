@@ -3,8 +3,7 @@ from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder, MessageHandler, filters
 from services.responder import generate_response
 
-# Load environment variables from .env (LOCAL)
-load_dotenv()
+load_dotenv()   # 👈 ADD THIS LINE
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -20,7 +19,6 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
