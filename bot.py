@@ -2,6 +2,7 @@ import os
 import json
 import re
 import logging
+import asyncio
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -384,20 +385,66 @@ if __name__ == "__main__":
         # Production mode: Use webhook with web server
         logging.info(f"Starting in webhook mode on port {PORT}")
         
+        # Track initialization status
+        bot_initialized = False
+        init_lock = asyncio.Lock()
+        
         # Create webhook handler
         async def webhook_handler(request):
             """Handle incoming webhook requests"""
+            global bot_initialized
+            
+            # Ensure bot is initialized before processing
+            if not bot_initialized:
+                async with init_lock:
+                    if not bot_initialized:
+                        try:
+                            await bot_app.initialize()
+                            await bot_app.start()
+                            bot_initialized = True
+                            logging.info("Bot application initialized and started")
+                        except Exception as e:
+                            logging.error(f"Failed to initialize/start bot: {e}", exc_info=True)
+                            return web.Response(text="Bot not initialized", status=503)
+            
             if request.method == "POST":
                 try:
+                    # Get the raw JSON data
                     data = await request.json()
+                    update_id = data.get('update_id', 'unknown')
+                    logging.info(f"Received webhook update: {update_id}")
+                    
+                    # Create Update object from JSON
                     update = Update.de_json(data, bot_app.bot)
-                    await bot_app.process_update(update)
+                    
+                    if update:
+                        # Process the update asynchronously
+                        await bot_app.process_update(update)
+                        logging.info(f"Successfully processed update {update.update_id}")
+                    else:
+                        logging.warning("Received update but Update object is None")
+                        
+                except json.JSONDecodeError as e:
+                    logging.error(f"JSON decode error: {e}")
+                    return web.Response(text="Invalid JSON", status=400)
                 except Exception as e:
-                    logging.error(f"Error processing webhook: {e}")
+                    logging.error(f"Error processing webhook: {e}", exc_info=True)
+                    return web.Response(text="Error processing update", status=500)
+            
             return web.Response(text="OK")
         
         # Set webhook on startup
         async def post_init(app):
+            # Initialize and start the bot application
+            global bot_initialized
+            try:
+                await bot_app.initialize()
+                await bot_app.start()
+                bot_initialized = True
+                logging.info("Bot application initialized and started")
+            except Exception as e:
+                logging.error(f"Failed to initialize/start bot: {e}", exc_info=True)
+            
             # Try to get webhook URL from environment or construct from Render service
             webhook_url = WEBHOOK_URL
             if not webhook_url:
@@ -416,8 +463,12 @@ if __name__ == "__main__":
                 try:
                     await bot_app.bot.set_webhook(url=webhook_path)
                     logging.info(f"✅ Webhook successfully set to {webhook_path}")
+                    
+                    # Verify webhook info
+                    webhook_info = await bot_app.bot.get_webhook_info()
+                    logging.info(f"Webhook info: URL={webhook_info.url}, Pending={webhook_info.pending_update_count}, Last error: {webhook_info.last_error_message}")
                 except Exception as e:
-                    logging.error(f"❌ Failed to set webhook: {e}")
+                    logging.error(f"❌ Failed to set webhook: {e}", exc_info=True)
             else:
                 logging.warning("⚠️ WEBHOOK_URL not set, webhook not configured. Please set WEBHOOK_URL environment variable.")
         
