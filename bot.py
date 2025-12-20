@@ -13,6 +13,10 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HUB_JSON_PATH = os.getenv("HUB_JSON_PATH")
 
+# Security: Validate that BOT_TOKEN is set
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is required but not set. Please set it in your .env file or environment variables.")
+
 # Load hubs data - support both file path and JSON string
 if HUB_JSON_PATH:
     # Check if it's a file path or JSON content
@@ -331,16 +335,75 @@ def handle_query(text):
                 return f"{header}\n\n" + "\n".join(lines)
             return f"❌ No servers in *{hub_name}* {node_name or ''}"
     
-    # 4. List hubs
+    # 4. Database queries - list primary DB IPs
+    if any(word in text_lower for word in ['primary', 'db', 'database']) and any(word in text_lower for word in ['list', 'ip', 'show', 'all']):
+        db_results = []
+        for hub_entry in hubs_data["hubs"]:
+            hub_name = hub_entry.get("hub") or list(hub_entry.keys())[0]
+            
+            # Hub-1 style
+            if "servers" in hub_entry and "nodes" not in hub_entry:
+                node_name = hub_entry.get("node", "N-1")
+                db_data = hub_entry.get("db", {})
+                for db_key, db_ip in db_data.items():
+                    if isinstance(db_ip, str) and "primary" in db_key.lower():
+                        db_results.append({
+                            "hub": hub_name,
+                            "node": node_name,
+                            "type": db_key.replace("_", " ").title(),
+                            "ip": db_ip
+                        })
+            
+            # Hub-2/3/4 style
+            elif "nodes" in hub_entry:
+                for node in hub_entry["nodes"]:
+                    node_name = node.get("node", "N-1")
+                    db_data = node.get("db", {})
+                    for db_key, db_ip in db_data.items():
+                        if isinstance(db_ip, str) and "primary" in db_key.lower():
+                            db_results.append({
+                                "hub": hub_name,
+                                "node": node_name,
+                                "type": db_key.replace("_", " ").title(),
+                                "ip": db_ip
+                            })
+            
+            # Hub-5/6 style
+            else:
+                for hub_key, nodes_data in hub_entry.items():
+                    if isinstance(nodes_data, dict):
+                        hub_name = hub_key
+                        for node_key, node_data in nodes_data.items():
+                            node_name = node_key
+                            db_data = node_data.get("database", {})
+                            for db_key, db_ip in db_data.items():
+                                if isinstance(db_ip, str) and "primary" in db_key.lower():
+                                    db_results.append({
+                                        "hub": hub_name,
+                                        "node": node_name,
+                                        "type": db_key.replace("_", " ").title(),
+                                        "ip": db_ip
+                                    })
+        
+        if db_results:
+            output = ["💾 *Primary Database IPs:*\n"]
+            for db in sorted(db_results, key=lambda x: (x["hub"], x["node"])):
+                output.append(f"🎯 *{db['hub']} {db['node']}*\n   `{db['ip']}` ({db['type']})")
+            return "\n".join(output)
+        else:
+            return "❌ No primary databases found"
+    
+    # 5. List hubs
     if 'hub' in text_lower and 'list' in text_lower:
         hubs = sorted(set(h.get("hub") or list(h.keys())[0] for h in hubs_data["hubs"]))
         return f"🏠 *Hubs:*\n`{', '.join(hubs)}`"
     
-    # 5. Help
+    # 6. Help
     return (
         "🤖 *HubBot*\n\n"
         "🔍 `10.222.197.214` | `h3pc1`\n\n"
-        "📋 `Hub3 N1 connectors` | `Hub-2 N-2`"
+        "📋 `Hub3 N1 connectors` | `Hub-2 N-2`\n\n"
+        "💾 `list primary db ip` | `primary database`"
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -355,6 +418,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def create_app():
     """Create and configure the bot application"""
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN is not set. Cannot create bot application.")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -365,8 +430,10 @@ bot_app = None
 
 # Health check endpoint
 async def health_check(request):
-    """Health check endpoint for Render"""
-    return web.Response(text="Bot is running")
+    """Health check endpoint for Render - also used for keep-alive"""
+    # Log the ping to show activity
+    logging.debug("Health check ping received")
+    return web.Response(text="Bot is running", headers={"Cache-Control": "no-cache"})
 
 if __name__ == "__main__":
     # Configure logging
@@ -472,30 +539,84 @@ if __name__ == "__main__":
             else:
                 logging.warning("⚠️ WEBHOOK_URL not set, webhook not configured. Please set WEBHOOK_URL environment variable.")
         
-        # Keep-alive task to prevent Render from sleeping
+        # Keep-alive task to prevent Render from sleeping - 24/7 active
         async def keep_alive_background(app):
-            """Background task to periodically ping health endpoint"""
+            """Background task to continuously ping health endpoint 24/7 - never stops"""
             import aiohttp
             
             # Wait for server to be ready
-            await asyncio.sleep(15)
+            await asyncio.sleep(5)
+            logging.info("🔄 Keep-alive task started - running 24/7, pinging every 2 minutes")
             
-            while True:
+            ping_count = 0
+            consecutive_failures = 0
+            max_failures = 5
+            
+            while True:  # Infinite loop - runs 24/7
                 try:
+                    ping_count += 1
                     # Ping our own health endpoint to keep service alive
                     async with aiohttp.ClientSession() as session:
-                        async with session.get(f"http://localhost:{PORT}/health", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        async with session.get(
+                            f"http://localhost:{PORT}/health", 
+                            timeout=aiohttp.ClientTimeout(total=10)
+                        ) as resp:
                             if resp.status == 200:
-                                logging.debug("Keep-alive ping successful")
+                                consecutive_failures = 0
+                                if ping_count % 15 == 0:  # Log every 30 minutes (15 pings * 2 min)
+                                    logging.info(f"✅ Keep-alive active - {ping_count} pings completed (24/7 running)")
                             else:
+                                consecutive_failures += 1
                                 logging.warning(f"Keep-alive ping returned status {resp.status}")
                 except asyncio.TimeoutError:
-                    logging.warning("Keep-alive ping timed out")
+                    consecutive_failures += 1
+                    logging.warning("Keep-alive ping timed out - retrying immediately...")
                 except Exception as e:
-                    logging.error(f"Keep-alive ping failed: {e}")
+                    consecutive_failures += 1
+                    logging.error(f"Keep-alive ping failed: {e} - retrying immediately...")
                 
-                # Ping every 5 minutes (300 seconds) - Render free tier sleeps after ~15 min of inactivity
-                await asyncio.sleep(300)
+                # If too many failures, log warning but continue
+                if consecutive_failures >= max_failures:
+                    logging.error(f"⚠️ Keep-alive has {consecutive_failures} consecutive failures - but continuing 24/7")
+                    consecutive_failures = 0  # Reset to prevent spam
+                
+                # Ping every 2 minutes (120 seconds) - aggressive to prevent sleep
+                # Render free tier sleeps after ~15 min of inactivity
+                # 2 min intervals = 7.5 pings per 15 min = constant activity
+                await asyncio.sleep(120)
+        
+        # Additional keep-alive: ping external URL if available (for redundancy)
+        async def external_keep_alive_background(app):
+            """Secondary keep-alive that pings external URL if WEBHOOK_URL is set"""
+            import aiohttp
+            
+            await asyncio.sleep(30)  # Start after initial setup
+            
+            webhook_url = WEBHOOK_URL or os.getenv("RENDER_EXTERNAL_URL")
+            if not webhook_url:
+                service_name = os.getenv("RENDER_SERVICE_NAME", "lapu-all-server-bot")
+                webhook_url = f"https://{service_name}.onrender.com"
+            
+            if webhook_url:
+                logging.info(f"🌐 External keep-alive started - will ping {webhook_url}/health every 3 minutes")
+                
+                ping_count = 0
+                while True:
+                    try:
+                        ping_count += 1
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(
+                                f"{webhook_url}/health",
+                                timeout=aiohttp.ClientTimeout(total=15)
+                            ) as resp:
+                                if resp.status == 200:
+                                    if ping_count % 10 == 0:  # Log every 30 minutes
+                                        logging.info(f"✅ External keep-alive active - {ping_count} external pings")
+                    except Exception as e:
+                        logging.debug(f"External keep-alive ping: {e}")
+                    
+                    # Ping every 3 minutes (180 seconds) - different interval from internal
+                    await asyncio.sleep(180)
         
         # Create web application
         web_app = web.Application()
@@ -504,9 +625,13 @@ if __name__ == "__main__":
         web_app.router.add_get("/", health_check)
         web_app.on_startup.append(post_init)
         
-        # Start keep-alive background task
+        # Start both keep-alive tasks (internal + external for redundancy)
         async def start_keep_alive(app):
+            # Internal keep-alive (every 2 min)
             asyncio.create_task(keep_alive_background(app))
+            # External keep-alive (every 3 min) - provides redundancy
+            asyncio.create_task(external_keep_alive_background(app))
+            logging.info("🔄 Both keep-alive tasks started - 24/7 active protection")
         
         web_app.on_startup.append(start_keep_alive)
         
@@ -516,4 +641,21 @@ if __name__ == "__main__":
     else:
         # Development mode: Use polling
         logging.info("Starting in polling mode (development)")
+        # Delete any existing webhook first to avoid conflicts with Render deployment
+        # Use synchronous HTTP request with httpx (already available) to avoid event loop conflicts
+        try:
+            import httpx
+            delete_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
+            with httpx.Client(timeout=5.0) as client:
+                response = client.get(delete_url)
+                if response.status_code == 200:
+                    logging.info("✅ Deleted existing webhook for local development")
+                else:
+                    logging.warning(f"⚠️ Webhook deletion returned status {response.status_code}")
+        except ImportError:
+            logging.warning("⚠️ 'httpx' library not available, skipping webhook deletion")
+        except Exception as e:
+            logging.warning(f"⚠️ Could not delete webhook (may not exist): {e}")
+        
+        # Now start polling (it will create its own event loop)
         bot_app.run_polling()
